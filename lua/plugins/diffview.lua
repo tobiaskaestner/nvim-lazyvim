@@ -3,11 +3,18 @@ return {
   cmd = { "DiffviewOpen", "DiffviewClose", "DiffviewToggleFiles", "DiffviewFocusFiles", "DiffviewFileHistory" },
   keys = {
     {
-      "<leader>gd",
+      "<leader>gm",
       function()
         vim.cmd("DiffviewOpen " .. require("util.git").cflag())
       end,
-      desc = "Diffview Open",
+      desc = "Diffview Open (merge tool)",
+    },
+    {
+      "<leader>gS",
+      function()
+        vim.cmd("DiffviewOpen --staged " .. require("util.git").cflag())
+      end,
+      desc = "Diffview Staged (vs HEAD)",
     },
     {
       "<leader>gh",
