@@ -1,5 +1,67 @@
+-- Seed a grep from the visual selection or the word under the cursor, then
+-- open the custom "grep" source (util.neotree_grep, registered below) rooted
+-- at `dir`. Inside the view, `S` runs a new search; each matching line is
+-- nested under its file and opens at that exact line/column.
+local function open_grep(dir)
+  require("util.neotree_grep").open({ dir = dir, default = require("util.text").selection_or_cword() })
+end
+
+-- The keys below are neo-tree entry points rooted somewhere other than cwd:
+-- LazyVim's own <leader>fe/<leader>e/<leader>be all root at cwd, which in this
+-- workspace is usually the west topdir rather than the repo you're editing.
 return {
   "nvim-neo-tree/neo-tree.nvim",
+  keys = {
+    {
+      "<leader>fC",
+      function()
+        vim.cmd("tabnew")
+        require("neo-tree.command").execute({ dir = vim.fn.stdpath("config") })
+      end,
+      desc = "Open config folder in new tab",
+    },
+    {
+      "<leader>fw",
+      function()
+        require("neo-tree.command").execute({ toggle = true, dir = require("util.git").west_root() })
+      end,
+      desc = "Explorer at workspace root (.west)",
+    },
+    -- Focused view: only open buffers + their parent folders. Buffers outside
+    -- the chosen root are silently omitted.
+    {
+      "<leader>bE",
+      function()
+        local dir = require("util.git").buf_root()
+        require("neo-tree.command").execute({ source = "buffers", toggle = true, dir = dir })
+      end,
+      desc = "Buffer Explorer (git root)",
+    },
+    {
+      "<leader>bW",
+      function()
+        local dir = require("util.git").west_root()
+        require("neo-tree.command").execute({ source = "buffers", toggle = true, dir = dir })
+      end,
+      desc = "Buffer Explorer (west root)",
+    },
+    {
+      "<leader>fs",
+      function()
+        open_grep(require("util.git").buf_root())
+      end,
+      mode = { "n", "x" },
+      desc = "Grep tree (content search @ git root)",
+    },
+    {
+      "<leader>fS",
+      function()
+        open_grep(require("util.git").west_root())
+      end,
+      mode = { "n", "x" },
+      desc = "Grep tree (content search @ west root)",
+    },
+  },
   opts = {
     -- Register the custom "grep" source (lua/util/neotree_grep.lua) alongside
     -- the built-ins, and show a clickable source-selector bar so file / buffer
@@ -76,6 +138,20 @@ return {
   },
   config = function(_, opts)
     require("neo-tree").setup(opts)
+    -- Pin the sidebar's width against the autoresizers (focus.nvim's
+    -- autoresize, `:wincmd =`): without winfixwidth the tree gets squeezed
+    -- or stretched every time the window layout changes. Deferred because
+    -- `vim.bo.filetype` isn't settled yet at WinEnter time.
+    vim.api.nvim_create_autocmd("WinEnter", {
+      group = vim.api.nvim_create_augroup("NeoTreeFixWidth", { clear = true }),
+      callback = function()
+        vim.schedule(function()
+          if vim.bo.filetype == "neo-tree" then
+            vim.wo.winfixwidth = true
+          end
+        end)
+      end,
+    })
     -- After a `/`/`D`/`f` search, collapse folders whose subtree contains no
     -- further match — see lua/util/neotree_collapse_search.lua for why
     -- neo-tree needs help here (it fully expands a matched folder's subtree

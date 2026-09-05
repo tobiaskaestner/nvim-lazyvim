@@ -60,7 +60,11 @@ return {
       },
     })
 
-    -- reuse the same configs for plain C if needed
-    dap.configurations.c = dap.configurations.cpp
+    -- Same configs for plain C -- but a COPY, not the same table. They used to
+    -- be one shared table, so dap-zephyr.lua's `list_extend(configurations.c,
+    -- ...)` also appended its QEMU attach entries to the C++ list. (The alias
+    -- was order-dependent the other way too: had dap-zephyr's opts run first,
+    -- this line would have overwritten its configs outright.)
+    dap.configurations.c = vim.deepcopy(dap.configurations.cpp)
   end,
 }

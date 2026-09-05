@@ -1,10 +1,11 @@
 -- nvim-dap-python's own get_python_path() only checks <lsp_root>/.venv (after
 -- $VIRTUAL_ENV/$CONDA_PREFIX). pyright's root_dir for files under btr-shields
 -- is the git repo itself, but the actual venv lives one level up, at the west
--- workspace root (/wrk/z/ws-up/.venv) -- same layout mismatch that broke
--- <leader>gl's git root. Without this, <leader>dPt/<leader>dPc (debug
--- method/class, from the lang.python extra) fall back to a bare `python3`
--- that can't import the package under test.
+-- workspace root -- same layout mismatch that broke <leader>gl's git root, and
+-- the reason util.git.west_python exists (neotest-python needs it too).
+-- Without this, <leader>dPt/<leader>dPc (debug method/class, from the
+-- lang.python extra) fall back to a bare `python3` that can't import the
+-- package under test.
 -- justMyCode=false + subProcess=true (explicit, though subProcess already
 -- defaults true): tests here (e.g. rigc's integration tests) shell out to
 -- `west`, which lives in site-packages -- justMyCode's library-code
@@ -32,10 +33,6 @@ return {
     },
   },
   opts = function()
-    require("dap-python").resolve_python = function()
-      local marker = vim.fs.find({ ".west" }, { upward = true, type = "directory", path = vim.uv.cwd() })[1]
-      local west_root = marker and vim.fn.fnamemodify(marker, ":h") or vim.uv.cwd()
-      return west_root .. "/.venv/bin/python3"
-    end
+    require("dap-python").resolve_python = require("util.git").west_python
   end,
 }
