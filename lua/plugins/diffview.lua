@@ -17,6 +17,13 @@ return {
       desc = "Diffview Staged (vs HEAD)",
     },
     {
+      "<leader>gW",
+      function()
+        vim.cmd("DiffviewOpen " .. require("util.git").cflag())
+      end,
+      desc = "Diffview Worktree (dirty, vs index)",
+    },
+    {
       "<leader>gh",
       function()
         vim.cmd("DiffviewFileHistory " .. require("util.git").cflag() .. " " .. vim.fn.expand("%:p"))

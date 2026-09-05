@@ -46,13 +46,8 @@ vim.keymap.set('n', '<leader>cd', function()
   vim.notify('lcd → ' .. root)
 end, { desc = 'lcd to buffer git root' })
 
-local function west_root()
-  local marker = vim.fs.find({ '.west' }, { upward = true, type = 'directory', path = vim.uv.cwd() })[1]
-  return marker and vim.fn.fnamemodify(marker, ':h') or vim.uv.cwd()
-end
-
 vim.keymap.set('n', '<leader>fw', function()
-  require('neo-tree.command').execute({ toggle = true, dir = west_root() })
+  require('neo-tree.command').execute({ toggle = true, dir = git.west_root() })
 end, { desc = 'Explorer at workspace root (.west)' })
 
 -- Buffer Explorer (focused view: only open buffers + their parent folders),
@@ -66,7 +61,7 @@ end, { desc = 'Buffer Explorer (git root)' })
 -- Same focused buffers view, rooted at the west workspace root (.west). Widest
 -- scope: shows open buffers across every module in the workspace.
 vim.keymap.set('n', '<leader>bW', function()
-  require('neo-tree.command').execute({ source = 'buffers', toggle = true, dir = west_root() })
+  require('neo-tree.command').execute({ source = 'buffers', toggle = true, dir = git.west_root() })
 end, { desc = 'Buffer Explorer (west root)' })
 
 -- Show the current buffer's full absolute path (also copies it to the system
@@ -99,19 +94,12 @@ end, { desc = 'Show full path of buffer (copy)' })
 
 -- Grep tree: open the custom neo-tree "grep" source (util.neotree_grep) rooted
 -- at the buffer's git repo, seeded with the visual selection or the word under
--- the cursor. Inside the view, `S` runs a new search. Shows files whose content
--- matches, keeping the folder structure. Seed the search from the visual
+-- the cursor. Inside the view, `S` runs a new search. Shows each matching line
+-- nested under its file, keeping the folder structure; selecting a line opens
+-- the buffer at that exact line/column. Seed the search from the visual
 -- selection or the word under the cursor, then open rooted at root_fn().
 local function open_grep(root_fn)
-  local mode = vim.fn.mode()
-  local seed
-  if mode == 'v' or mode == 'V' or mode == '\22' then
-    local ok, region = pcall(vim.fn.getregion, vim.fn.getpos('v'), vim.fn.getpos('.'), { type = mode })
-    seed = ok and region[1] or ''
-    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
-  else
-    seed = vim.fn.expand('<cword>')
-  end
+  local seed = require('util.text').selection_or_cword()
   require('util.neotree_grep').open({ dir = root_fn(), default = seed })
 end
 
@@ -120,7 +108,7 @@ vim.keymap.set({ 'n', 'x' }, '<leader>fs', function()
 end, { desc = 'Grep tree (content search @ git root)' })
 
 vim.keymap.set({ 'n', 'x' }, '<leader>fS', function()
-  open_grep(west_root)
+  open_grep(git.west_root)
 end, { desc = 'Grep tree (content search @ west root)' })
 
 vim.keymap.set('n', '<leader>ub', function()

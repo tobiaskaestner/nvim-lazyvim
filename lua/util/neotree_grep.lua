@@ -2,9 +2,11 @@
 --
 -- Shows files whose CONTENT matches a search string (via ripgrep), rendered as
 -- a folder tree — like a live-grep picker, but preserving the directory
--- structure of the results. Modeled on neo-tree's built-in `buffers` source:
--- it builds a tree from a list of paths (here, rg's --files-with-matches
--- output) scoped to the current root; matches outside the root are ignored.
+-- structure of the results. Each matching line is nested under its file as a
+-- child node showing the line number + text; selecting one opens the file at
+-- that exact line/column. Modeled on neo-tree's built-in `buffers` source: it
+-- builds a tree from file items (keyed by path) scoped to the current root,
+-- then hangs match nodes off each file item's `children`.
 --
 -- Registered by adding "util.neotree_grep" to neo-tree's `sources` (see
 -- lua/plugins/neo-tree.lua). Entry point + keymap live in config/keymaps.lua
@@ -14,6 +16,7 @@ local renderer = require("neo-tree.ui.renderer")
 local manager = require("neo-tree.sources.manager")
 local file_items = require("neo-tree.sources.common.file-items")
 local highlights = require("neo-tree.ui.highlights")
+local common_components = require("neo-tree.sources.common.components")
 local cc = require("neo-tree.sources.common.commands")
 local utils = require("neo-tree.utils")
 
@@ -25,8 +28,9 @@ local M = {
   pattern = nil,
 }
 
--- Cap on rendered results: a workspace-wide search can match tens of thousands
--- of files; a fully-expanded tree that big is unusable, so we truncate.
+-- Cap on rendered results (match lines, not files): a workspace-wide search
+-- can match tens of thousands of lines; a fully-expanded tree that big is
+-- unusable, so we truncate.
 local MAX_RESULTS = 2000
 
 -- What to exclude is context-specific, so it is NOT baked in here. ripgrep
@@ -41,9 +45,28 @@ local MAX_RESULTS = 2000
 -- `.ignore` is honored even when the root is not a git repo (unlike
 -- `.gitignore`, which rg only applies inside a repo).
 
--- Render a list of matching file paths (possibly empty) as the result tree.
+-- Sort match children by line/col (the order rg found them in), everything
+-- else by the common file-items convention (type, then path). Needed because
+-- match nodes under the same file all share that file's `.path`, so the
+-- default path-based comparator can't tell them apart.
+local function sort_nodes(a, b)
+  if a.extra and a.extra.position and b.extra and b.extra.position then
+    local a_line, b_line = a.extra.position[1], b.extra.position[1]
+    if a_line ~= b_line then
+      return a_line < b_line
+    end
+    return (a.extra.position[2] or 0) < (b.extra.position[2] or 0)
+  end
+  if a.type == b.type then
+    return a.path < b.path
+  end
+  return a.type < b.type
+end
+
+-- Render the accumulated matches (possibly empty) as the result tree: one
+-- file node per matched file, with a "match" child node per matching line.
 -- `status` is nil | "searching" | "truncated" for the root label.
-local function render(state, files, status)
+local function render(state, matches, status)
   local root_path = state.path
   local context = file_items.create_context()
   context.state = state
@@ -53,15 +76,31 @@ local function render(state, files, status)
   root.loaded = true
   context.folders[root_path] = root
 
-  local count = 0
-  for _, path in ipairs(files or {}) do
-    if utils.is_subpath(root_path, path) then
-      if pcall(file_items.create_item, context, path, "file") then
-        count = count + 1
+  local file_count = 0
+  local match_count = 0
+  local file_ids_to_expand = {}
+  for i, m in ipairs(matches or {}) do
+    if utils.is_subpath(root_path, m.path) then
+      local ok, file_item = pcall(file_items.create_item, context, m.path, "file")
+      if ok then
+        if not file_item.children then
+          file_item.children = {}
+          file_count = file_count + 1
+          table.insert(file_ids_to_expand, file_item.id)
+        end
+        match_count = match_count + 1
+        table.insert(file_item.children, {
+          id = string.format("%s:%d:%d:%d", m.path, m.line, m.col, i),
+          name = m.text,
+          type = "match",
+          path = m.path,
+          extra = { position = { m.line - 1, m.col } },
+        })
       end
     end
   end
-  state.grep_count = count
+  state.grep_count = file_count
+  state.grep_match_count = match_count
   state.grep_status = status
 
   -- Fully expand so the whole result structure is visible at a glance.
@@ -69,6 +108,11 @@ local function render(state, files, status)
   for id, _ in pairs(context.folders) do
     table.insert(state.default_expanded_nodes, id)
   end
+  for _, id in ipairs(file_ids_to_expand) do
+    table.insert(state.default_expanded_nodes, id)
+  end
+
+  state.sort_function_override = sort_nodes
   file_items.advanced_sort(root.children, state)
   pcall(renderer.show_nodes, { root }, state)
   state.loading = false
@@ -99,11 +143,42 @@ local function start_spinner()
   end, { ["repeat"] = -1 })
 end
 
--- Kick off the search. rg runs in the BACKGROUND and its stdout is consumed
--- incrementally: matches are added to the tree as they arrive (throttled
--- re-render), so results appear progressively instead of after rg finishes.
--- The job is killed once MAX_RESULTS is reached. A new search cancels the
--- previous one via a generation token.
+-- Longest a match line's displayed text may be before truncating (keeps the
+-- tree readable when a line is e.g. minified JS).
+local MAX_TEXT_LEN = 300
+
+-- Turn one decoded rg --json "match" object into a {path, line, col, text}
+-- entry, or nil if it doesn't look like a match we can use.
+local function parse_match(obj)
+  if not (obj and obj.data) then
+    return nil
+  end
+  local data = obj.data
+  local path = data.path and data.path.text
+  local line_number = data.line_number
+  if not (path and line_number) then
+    return nil
+  end
+  local text = vim.trim((data.lines and data.lines.text or ""):gsub("[\r\n]+$", ""))
+  if #text > MAX_TEXT_LEN then
+    text = text:sub(1, MAX_TEXT_LEN) .. "…"
+  end
+  local col = 0
+  local sub = data.submatches and data.submatches[1]
+  if sub and sub.start then
+    col = sub.start
+  end
+  return { path = path, line = line_number, col = col, text = text }
+end
+
+-- Kick off the search. rg runs in the BACKGROUND; its stdout (JSON lines) is
+-- consumed incrementally. The raw callback only does cheap string
+-- classification (no vim.* API calls, since it may run in a fast/luv
+-- context) — actual JSON decoding happens later inside vim.schedule. Matches
+-- are added to the tree as they arrive (throttled re-render), so results
+-- appear progressively instead of after rg finishes. The job is killed once
+-- MAX_RESULTS is reached. A new search cancels the previous one via a
+-- generation token.
 local function build(state)
   state.grep_pattern = M.pattern
   local root_path = state.path
@@ -132,18 +207,45 @@ local function build(state)
     return
   end
 
-  local files = {} -- accumulated matches (capped at MAX_RESULTS)
+  local raw_matches = {} -- raw JSON "match" lines (capped at MAX_RESULTS)
+  local matches = {} -- decoded {path, line, col, text} entries
+  local decoded = 0 -- how many of raw_matches have been decoded so far
   local pending = "" -- buffer for an incomplete trailing line across chunks
   local truncated = false
   local finished = false
   local scheduled = false
+
+  local function decode_new()
+    for i = decoded + 1, #raw_matches do
+      local ok, obj = pcall(vim.json.decode, raw_matches[i])
+      local m = ok and parse_match(obj) or nil
+      if m then
+        matches[#matches + 1] = m
+      end
+    end
+    decoded = #raw_matches
+  end
+
+  -- nil | "searching" | "truncated" for the root label. NB: `finished and
+  -- (truncated and "truncated" or nil) or "searching"` looks equivalent but
+  -- isn't — `true and nil` is `nil` in Lua, so that form falls through to
+  -- "searching" even once a search finishes cleanly.
+  local function current_status()
+    if not finished then
+      return "searching"
+    elseif truncated then
+      return "truncated"
+    end
+    return nil
+  end
 
   local function flush()
     scheduled = false
     if sid ~= M._search_id then
       return
     end
-    render(state, files, finished and (truncated and "truncated" or nil) or "searching")
+    decode_new()
+    render(state, matches, current_status())
   end
   local function schedule_render()
     if scheduled or sid ~= M._search_id then
@@ -158,7 +260,7 @@ local function build(state)
 
   -- No hardcoded excludes: rg respects .ignore / .rgignore / .gitignore files
   -- found under root_path, so pruning is controlled from the filesystem.
-  local args = { "rg", "--files-with-matches", "--smart-case", "--color=never", "-e", M.pattern, root_path }
+  local args = { "rg", "--json", "--smart-case", "--color=never", "-e", M.pattern, root_path }
 
   M._job = vim.system(args, {
     text = true,
@@ -174,9 +276,11 @@ local function build(state)
         end
         local line = pending:sub(1, nl - 1)
         pending = pending:sub(nl + 1)
-        if line ~= "" then
-          if #files < MAX_RESULTS then
-            files[#files + 1] = line
+        -- Cheap textual pre-filter (no JSON decode yet) to skip begin/end/
+        -- summary lines and enforce the cap before doing real parsing.
+        if line ~= "" and line:find('"type":"match"', 1, true) then
+          if #raw_matches < MAX_RESULTS then
+            raw_matches[#raw_matches + 1] = line
           else
             truncated = true
             if M._job then
@@ -221,7 +325,8 @@ local function build(state)
     end
     finished = true
     scheduled = false
-    render(state, files, truncated and "truncated" or nil)
+    decode_new()
+    render(state, matches, truncated and "truncated" or nil)
     M._search_id = M._search_id + 1
     M._cancel = nil
   end
@@ -289,12 +394,21 @@ function M.open(opts)
 end
 
 --------------------------------------------------------------------------------
--- components: reuse the common component library, override the root label.
+-- components: reuse the common component library, override the root label
+-- and add rendering for "match" (matched-line) nodes.
 --------------------------------------------------------------------------------
 local components = {}
 
 ---@param config table
 function components.name(config, node, state)
+  if node.type == "match" then
+    local lnum = ((node.extra and node.extra.position and node.extra.position[1]) or 0) + 1
+    return {
+      { text = string.format("%d: ", lnum), highlight = highlights.DIM_TEXT },
+      { text = node.name, highlight = highlights.FILE_NAME },
+    }
+  end
+
   local highlight = config.highlight or highlights.FILE_NAME
   local name = node.name
   if node.type == "directory" then
@@ -303,11 +417,20 @@ function components.name(config, node, state)
       local status = state.grep_status
       local detail
       if status == "searching" then
-        detail = string.format("%s searching… %d", SPINNER[M._spin_frame or 1], state.grep_count or 0)
+        detail = string.format(
+          "%s searching… %d files, %d matches",
+          SPINNER[M._spin_frame or 1],
+          state.grep_count or 0,
+          state.grep_match_count or 0
+        )
       elseif status == "truncated" then
-        detail = string.format("first %d files, more matched", state.grep_count or 0)
+        detail = string.format(
+          "%d files, first %d matches, more found",
+          state.grep_count or 0,
+          state.grep_match_count or 0
+        )
       else
-        detail = string.format("%d files", state.grep_count or 0)
+        detail = string.format("%d files, %d matches", state.grep_count or 0, state.grep_match_count or 0)
       end
       name = string.format('GREP: "%s"  (%s)', state.grep_pattern or "", detail)
     else
@@ -317,10 +440,27 @@ function components.name(config, node, state)
   return { text = name, highlight = highlight }
 end
 
-M.components = vim.tbl_deep_extend("force", require("neo-tree.sources.common.components"), components)
+-- Matched-line nodes aren't real files, so skip the devicons/file-icon
+-- provider (which would try to guess an icon from our synthetic name) and
+-- fall back to the common component for everything else (files/directories).
+function components.icon(config, node, state)
+  if node.type == "match" then
+    return { text = "  ", highlight = highlights.DIM_TEXT }
+  end
+  return common_components.icon(config, node, state)
+end
+
+M.components = vim.tbl_deep_extend("force", common_components, components)
 
 --------------------------------------------------------------------------------
 -- commands: common file commands (open/split/…) + tree ops that re-run rg.
+--
+-- "match" nodes are type = "match" (not "file"), so they're never treated as
+-- expandable/toggleable by the common `open` family — they have no children
+-- and aren't directories, so `open_with_cmd` falls straight through to
+-- opening `node.path` and then, since we set `node.extra.position`, jumping
+-- the cursor there. No override needed here; that's the same generic
+-- mechanism neo-tree's document_symbols source relies on.
 --------------------------------------------------------------------------------
 local commands = {}
 
@@ -365,6 +505,17 @@ M.commands = commands
 --------------------------------------------------------------------------------
 M.default_config = {
   bind_to_cwd = false,
+  -- "match" isn't one of the built-in node types (file/directory/message), so
+  -- it needs its own renderer entry or neo-tree falls back to a debug label
+  -- ("match: <name>"). Keep it minimal: indent (for nesting under the file),
+  -- our custom icon, our custom name.
+  renderers = {
+    match = {
+      { "indent" },
+      { "icon" },
+      { "name" },
+    },
+  },
   window = {
     mappings = {
       ["S"] = "grep_search", -- new search (also stops the running one)

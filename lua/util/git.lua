@@ -1,22 +1,54 @@
 local M = {}
 
--- Resolve the git repository the CURRENT BUFFER's file belongs to, by walking
--- up from the file's own directory looking for a `.git` entry (a dir for normal
--- repos, a file for submodules/worktrees). Independent of cwd, so it works no
--- matter where you've cd'd. Falls back to cwd for unnamed/scratch buffers or
--- files that aren't inside a repo.
+-- The git repo containing `file`, by walking up from its directory looking
+-- for a `.git` entry (a dir for normal repos, a file for submodules/
+-- worktrees). Returns nil if `file` isn't a real, readable path, or isn't
+-- inside a repo.
+local function root_of(file)
+  if file == "" or vim.fn.filereadable(file) ~= 1 then
+    return nil
+  end
+  local dotgit = vim.fs.find(".git", { upward = true, path = vim.fn.fnamemodify(file, ":h") })[1]
+  return dotgit and vim.fn.fnamemodify(dotgit, ":h")
+end
+
+-- Resolve the git repository the CURRENT BUFFER's file belongs to. Independent
+-- of cwd, so it works no matter where you've cd'd. If the current buffer isn't
+-- a real file (terminal, scratch, dashboard -- e.g. right after closing a
+-- lazygit floating terminal), falls back to the most recently used buffer
+-- that IS one, rather than straight to cwd: in this side-by-side-worktrees
+-- workspace, cwd is often the west topdir, which is not a git repo at all
+-- (see [[project_ws_up_side_by_side_worktrees]]) -- that silently resolved
+-- every <leader>g* keymap to the wrong (non-)repo instead of erroring.
 function M.buf_root()
-  local file = vim.api.nvim_buf_get_name(0)
-  local start = (file ~= "" and vim.fn.filereadable(file) == 1) and vim.fn.fnamemodify(file, ":h")
-    or vim.uv.cwd()
-  local dotgit = vim.fs.find(".git", { upward = true, path = start })[1]
-  return dotgit and vim.fn.fnamemodify(dotgit, ":h") or start
+  local root = root_of(vim.api.nvim_buf_get_name(0))
+  if root then
+    return root
+  end
+
+  local bufs = vim.fn.getbufinfo({ buflisted = 1 })
+  table.sort(bufs, function(a, b) return a.lastused > b.lastused end)
+  for _, buf in ipairs(bufs) do
+    root = root_of(buf.name)
+    if root then
+      return root
+    end
+  end
+
+  return vim.uv.cwd()
 end
 
 -- Diffview's `-C{path}` flag (git-style) pointing at the buffer's repo, ready to
 -- splice into a :Diffview* command. fnameescape handles spaces in the path.
 function M.cflag()
   return "-C" .. vim.fn.fnameescape(M.buf_root())
+end
+
+-- The west workspace root (topdir containing `.west`), independent of cwd.
+-- Falls back to cwd if no `.west` marker is found upward from it.
+function M.west_root()
+  local marker = vim.fs.find({ ".west" }, { upward = true, type = "directory", path = vim.uv.cwd() })[1]
+  return marker and vim.fn.fnamemodify(marker, ":h") or vim.uv.cwd()
 end
 
 -- Resolve the GitHub "owner/repo" slug for the CURRENT BUFFER's repo, so tools
