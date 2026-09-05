@@ -64,11 +64,37 @@ lua/
 | [`neotree_grep.lua`](lua/util/neotree_grep.lua) | A custom neo-tree **source**: ripgrep results rendered as a folder tree, with each matching line nested under its file. Streams results in from a background `rg` with a spinner, a result cap and cancellation. |
 | [`neotree_collapse_search.lua`](lua/util/neotree_collapse_search.lua) | Makes neo-tree's `/` search collapse folders that contain no further match, instead of fully expanding every matched directory's subtree. |
 | [`gitfile.lua`](lua/util/gitfile.lua) | Browse a ref or a file's history and open that version in a read-only buffer, with live `git show` previews. |
+| [`theme.lua`](lua/util/theme.lua) | Follows the system-wide catppuccin flavor — see below. |
 
 The two neo-tree modules are the dense ones. Both carry long header comments
 explaining *why* neo-tree needs the help — read those before changing them; the
 non-obvious behaviour they work around is not discoverable from the plugin's
 docs.
+
+## Theme: follows kitty and tmux
+
+`~/.config/current-theme` holds one word, `mocha` or `latte`. The `theme` shell
+function (`~/.config/zsh/conf.d/05-functions.zsh`) writes it and reloads kitty
+and tmux; nvim is simply a third reader of the same file.
+
+```sh
+theme toggle     # or: theme light / theme dark
+```
+
+Every running nvim retints immediately — no restart, no per-instance setup.
+[`util/theme.lua`](lua/util/theme.lua) picks the colorscheme at startup and
+watches the file (a debounced, non-recursive `fs_event` on `~/.config`), with
+`FocusGained`/`VimResume` as a safety net for switches that happen while nvim is
+suspended. An empty or unrecognised file leaves the current theme alone, so the
+truncate window of `echo > file` can't cause a flash of the wrong colors.
+
+`:Theme` re-reads the file and reapplies, if a switch is ever missed.
+
+The shell function stays the **only writer**. Having nvim write the file too
+would leave kitty and tmux stale, since switching properly means reloading them
+as well; the clean way to make the switch available from inside nvim would be to
+lift `theme()` into a standalone `~/.local/bin/theme` script that both the shell
+and nvim call.
 
 ## Custom keymaps
 
